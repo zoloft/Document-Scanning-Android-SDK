@@ -88,7 +88,7 @@ abstract class InternalScanActivity : AppCompatActivity() {
         originalImageFile.delete()
     }
 
-    private fun showCameraScreen() {
+    protected fun showCameraScreen() {
         val cameraScreenFragment = CameraScreenFragment.newInstance()
         addFragmentToBackStack(cameraScreenFragment, CAMERA_SCREEN_FRAGMENT_TAG)
     }
