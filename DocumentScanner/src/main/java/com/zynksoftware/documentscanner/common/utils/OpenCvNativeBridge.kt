@@ -25,11 +25,21 @@ import com.zynksoftware.documentscanner.common.extensions.scaleRectangle
 import com.zynksoftware.documentscanner.common.extensions.toBitmap
 import com.zynksoftware.documentscanner.common.extensions.toMat
 import com.zynksoftware.documentscanner.ui.components.Quadrilateral
-import org.opencv.core.*
+import org.opencv.core.Core
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.core.MatOfInt
+import org.opencv.core.MatOfPoint
+import org.opencv.core.MatOfPoint2f
+import org.opencv.core.Point
+import org.opencv.core.Scalar
+import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
-import java.util.*
-import kotlin.collections.ArrayList
-import kotlin.math.*
+import java.util.Collections
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sqrt
 
 
 internal class OpenCvNativeBridge {
@@ -47,6 +57,7 @@ internal class OpenCvNativeBridge {
         private const val BLURRING_KERNEL_SIZE = 5.0
         private const val DOWNSCALE_IMAGE_SIZE = 600.0
         private const val FIRST_MAX_CONTOURS = 10
+        private val morph_kernel = Mat(Size(10.0, 10.0), CvType.CV_8UC1, Scalar(255.0))
     }
 
     fun getScannedBitmap(bitmap: Bitmap, x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float, x4: Float, y4: Float): Bitmap {
@@ -85,8 +96,11 @@ internal class OpenCvNativeBridge {
         return largestRectangle?.contour?.scaleRectangle(1f / ratio)
     }
 
+    fun detectLargestQuadrilateral(src: Mat): Quadrilateral? =
+        detectLargestQuadrilateral2(src) ?: detectLargestQuadrilateral1(src)
+
     // patch from Udayraj123 (https://github.com/Udayraj123/LiveEdgeDetection)
-    fun detectLargestQuadrilateral(src: Mat): Quadrilateral? {
+    private fun detectLargestQuadrilateral1(src: Mat): Quadrilateral? {
         val destination = Mat()
         Imgproc.blur(src, src, Size(BLURRING_KERNEL_SIZE, BLURRING_KERNEL_SIZE))
 
@@ -107,7 +121,23 @@ internal class OpenCvNativeBridge {
 
         val largestContour: List<MatOfPoint>? = findLargestContours(destination)
         if (null != largestContour) {
-            return findQuadrilateral(largestContour)
+            return findQuadrilateral(largestContour) ?: findQuadrilateral2(largestContour)
+        }
+        return null
+    }
+
+    private fun findQuadrilateral2(mContourList: List<MatOfPoint>): Quadrilateral? {
+        for (c in mContourList) {
+            val c2f = MatOfPoint2f(*c.toArray())
+            val peri = Imgproc.arcLength(c2f, true)
+            val approx = MatOfPoint2f()
+            Imgproc.approxPolyDP(c2f, approx, 0.02 * peri, true)
+            val points = approx.toArray()
+            // select biggest 4 angles polygon
+            if (approx.rows() == 4) {
+                val foundPoints = sortPoints(points)
+                return Quadrilateral(approx, foundPoints)
+            }
         }
         return null
     }
@@ -243,5 +273,47 @@ internal class OpenCvNativeBridge {
         return Imgproc.contourArea(approx)
     }
 
+    private fun detectLargestQuadrilateral2(src: Mat): Quadrilateral? {
+        /*
+        *  1. We shall first blur and normalize the image for uniformity,
+        *  2. Truncate light-gray to white and normalize,
+        *  3. Apply canny edge detection,
+        *  4. Cutoff weak edges,
+        *  5. Apply closing(morphology), then proceed to finding contours.
+        */
 
+        val destination = Mat()
+
+        // step 1.
+        Imgproc.cvtColor(src, src, Imgproc.COLOR_BGR2GRAY, 4)
+        Imgproc.blur(src, src, Size(3.0, 3.0))
+        Core.normalize(src, src, 0.0, 255.0, Core.NORM_MINMAX)
+
+        // step 2.
+        // As most papers are bright in color, we can use truncation to make it uniformly bright.
+        Imgproc.threshold(src, src, 150.0,255.0, Imgproc.THRESH_TRUNC)
+        Core.normalize(src, src, 0.0, 255.0, Core.NORM_MINMAX)
+
+        // step 3.
+        // After above preprocessing, canny edge detection can now work much better.
+        Imgproc.Canny(src, destination, 185.0, 85.0)
+
+        // step 4.
+        // Cutoff the remaining weak edges
+        Imgproc.threshold(destination, destination, 155.0, 255.0, Imgproc.THRESH_TOZERO)
+
+        // step 5.
+        // Closing - closes small gaps. Completes the edges on canny image; AND also reduces stringy lines near edge of paper.
+        Imgproc.morphologyEx(destination, destination, Imgproc.MORPH_CLOSE,
+            morph_kernel,
+            Point(-1.0,-1.0),
+            1
+        )
+
+        val largestContour: List<MatOfPoint>? = findLargestContours(destination)
+        if (null != largestContour) {
+            return findQuadrilateral(largestContour) ?: findQuadrilateral2(largestContour)
+        }
+        return null
+    }
 }
